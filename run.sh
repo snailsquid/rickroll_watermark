@@ -1,0 +1,1 @@
+go run main.go input/original.jpeg output/modified.jpeg

@@ -1,0 +1,5 @@
+input:
+  original_image_path: "/input/image.jpeg"
+  secret_image_path: "/input/secret.jpeg"
+output:
+  modified_image_path: "/output/output.jpeg"
