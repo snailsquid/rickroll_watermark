@@ -61,12 +61,12 @@ func ReadFile(path string) []byte {
 	return data
 }
 
-func GetImage(data []byte) image.Image {
+func GetImage(data []byte) *image.Image {
 	img, err := jpeg.Decode(bytes.NewReader(data))
 	if err != nil {
 		panic(err)
 	}
 
 	fmt.Printf("bounds: %v\n", img.Bounds())
-	return img
+	return &img
 }
