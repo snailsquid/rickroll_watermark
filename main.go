@@ -124,6 +124,37 @@ func Start() {
 	reader := LoadImage(IMAGE_PATH)
 	InsertBitsToZigZags(zz, reader)
 
+	(*y)[0].Print()
+	quality := 100.0
+	// (*y)[0].Quantize(quality, true)
+	for _, dct := range *y {
+		dct.Quantize(quality, true)
+	}
+	(*y)[0].Print()
+}
+
+func (dct *DCT) Print() {
+	for i, row := range dct.at {
+		for j := range row {
+			fmt.Printf("%v ", (*dct).at[i][j])
+			if j == 7 {
+				fmt.Print("\n")
+			}
+		}
+	}
+}
+
+func (dct *DCT) Quantize(quality float64, y bool) {
+	if y {
+		scaled := scaleQTable(chrominanceQTable, int(quality))
+
+		for i, row := range dct.at {
+			for j := range row {
+				// fmt.Printf("%v : %v\n", dct.at[i][j], scaled[i*8+j])
+				(*dct).at[i][j] = math.Round(dct.at[i][j] / float64(scaled[i*8+j]))
+			}
+		}
+	}
 }
 
 func ImageToYCbCr(input image.Image) *image.YCbCr {
