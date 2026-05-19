@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"encoding/binary"
-	"image/color"
+	"flag"
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -38,41 +40,77 @@ func (bw *BitWriter) Flush() {
 	}
 }
 
-// 16-color global palette for maximum structural density
-var globalPalette = []color.RGBA{
-	{0, 0, 0, 255}, {255, 255, 255, 255}, {128, 128, 128, 255}, {255, 0, 0, 255},
-	{0, 255, 0, 255}, {0, 0, 255, 255}, {255, 255, 0, 255}, {255, 0, 255, 255},
-	{0, 255, 255, 255}, {128, 0, 0, 255}, {0, 128, 0, 255}, {0, 0, 128, 255},
-	{128, 128, 0, 255}, {128, 0, 128, 255}, {0, 128, 128, 255}, {64, 64, 64, 255},
+// BitReader for decode
+type BitReader struct {
+	data    []byte
+	byteIdx int
+	bitIdx  int
 }
 
-func getPaletteIndex(r, g, b int) uint64 {
-	bestIndex := 0
-	minDist := 10000000
-	for i, p := range globalPalette {
-		dr := r - int(p.R)
-		dg := g - int(p.G)
-		db := b - int(p.B)
-		dist := dr*dr + dg*dg + db*db
-		if dist < minDist {
-			minDist = dist
-			bestIndex = i
-		}
-	}
-	return uint64(bestIndex)
+func NewBitReader(data []byte) *BitReader {
+	return &BitReader{data: data}
 }
+
+func (br *BitReader) ReadBit() (int, error) {
+	if br.byteIdx >= len(br.data) {
+		return 0, io.EOF
+	}
+	shift := 7 - br.bitIdx
+	bit := int((br.data[br.byteIdx] >> shift) & 1)
+	br.bitIdx++
+	if br.bitIdx == 8 {
+		br.bitIdx = 0
+		br.byteIdx++
+	}
+	return bit, nil
+}
+
+func (br *BitReader) ReadBits(count int) (uint64, error) {
+	var val uint64
+	for i := 0; i < count; i++ {
+		bit, err := br.ReadBit()
+		if err != nil {
+			return 0, err
+		}
+		val = (val << 1) | uint64(bit)
+	}
+	return val, nil
+}
+
+// Color bit depths: Y 6-bit (64 levels), Cb/Cr 5-bit (32 levels)
+const (
+	yBits       = 6
+	cbBits      = 5
+	crBits      = 5
+	yPosBits    = 20 // position bits for Y plane (up to ~1M pixels)
+	chromaPosBits = 18 // position bits for Cb/Cr planes (up to ~262K positions)
+)
 
 func main() {
-	inputFile := "input.mp4"
-	targetWidth := 128
-	targetHeight := 128
+	mode := flag.String("mode", "encode", "encode or decode")
+	inputFile := flag.String("i", "input.mp4", "input file")
+	outputFile := flag.String("o", "optimized_video.bin", "output file")
+	targetWidth := flag.Int("w", 320, "target width")
+	targetHeight := flag.Int("h", 240, "target height")
+	maxBytes := flag.Int("max-bytes", 0, "max output file size (0 = unlimited)")
+	flag.Parse()
 
-	// Trigger FFmpeg to decode the MP4 on the fly and pipe raw RGB24 frames to stdout
+	switch *mode {
+	case "encode":
+		encode(*inputFile, *outputFile, *targetWidth, *targetHeight, *maxBytes)
+	case "decode":
+		decode(*inputFile, *outputFile, *targetWidth, *targetHeight)
+	default:
+		log.Fatalf("Unknown mode: %s. Use 'encode' or 'decode'.\n", *mode)
+	}
+}
+
+func encode(inputFile, outputFile string, targetWidth, targetHeight int, maxBytes int) {
 	cmd := exec.Command("ffmpeg",
 		"-i", inputFile,
-		"-vf", "scale=128:128", // Rescale video down to 128x128
+		"-vf", fmt.Sprintf("scale=%d:%d:flags=lanczos", targetWidth, targetHeight),
 		"-f", "rawvideo",
-		"-pix_fmt", "rgb24",
+		"-pix_fmt", "yuv420p",
 		"-",
 	)
 
@@ -87,82 +125,174 @@ func main() {
 
 	bw := &BitWriter{}
 
-	// Write basic global properties (Width, Height)
-	bw.WriteBits(uint64(targetWidth), 8)
-	bw.WriteBits(uint64(targetHeight), 8)
+	// Header: width (16), height (16), frame count placeholder (16)
+	bw.WriteBits(uint64(targetWidth), 16)
+	bw.WriteBits(uint64(targetHeight), 16)
 
-	// Placeholder slot for frame count (will overwrite this later once processing completes)
 	frameCountOffset := len(bw.bytes)
-	bw.bytes = append(bw.bytes, 0, 0) // 16-bit space holder
+	bw.bytes = append(bw.bytes, 0, 0)
 
-	// Write Palette mapping info (48 bytes total)
-	for _, p := range globalPalette {
-		bw.WriteBits(uint64(p.R), 8)
-		bw.WriteBits(uint64(p.G), 8)
-		bw.WriteBits(uint64(p.B), 8)
-	}
+	yPlaneSize := targetWidth * targetHeight
+	cbPlaneW := (targetWidth + 1) / 2
+	cbPlaneH := (targetHeight + 1) / 2
+	cbPlaneSize := cbPlaneW * cbPlaneH
+	crPlaneSize := cbPlaneSize
+	frameSize := yPlaneSize + cbPlaneSize + crPlaneSize
 
-	frameSize := targetWidth * targetHeight * 3 // 3 bytes per pixel (RGB)
 	buf := make([]byte, frameSize)
-	prevPixelIndices := make([]uint64, targetWidth*targetHeight)
 	frameCount := 0
 
 	for {
-		// Read one complete uncompressed video frame from the FFmpeg stream pipe
 		_, err := io.ReadFull(stdout, buf)
 		if err == io.EOF || err == io.ErrUnexpectedEOF {
-			break // Video processing finished
+			break
+		}
+		if err != nil {
+			log.Printf("Error reading frame: %v", err)
+			break
 		}
 
-		currentPixelIndices := make([]uint64, targetWidth*targetHeight)
-		idx := 0
-		for i := 0; i < len(buf); i += 3 {
-			currentPixelIndices[idx] = getPaletteIndex(int(buf[i]), int(buf[i+1]), int(buf[i+2]))
-			idx++
+		if maxBytes > 0 && len(bw.bytes)+yPlaneSize+cbPlaneSize+crPlaneSize+100 > maxBytes {
+			log.Printf("Frame %d would exceed limit, stopping", frameCount)
+			break
 		}
 
-		if frameCount == 0 {
-			// Frame 0 (I-Frame): Write all core pixel color identities sequentially
-			for _, val := range currentPixelIndices {
-				bw.WriteBits(val, 4)
-			}
-		} else {
-			// Frames 1+ (P-Frames): Detect pixel changes vs previous state
-			type DeltaPixel struct {
-				index uint64
-				color uint64
-			}
-			var deltas []DeltaPixel
+		yPlane := buf[:yPlaneSize]
+		cbPlane := buf[yPlaneSize : yPlaneSize+cbPlaneSize]
+		crPlane := buf[yPlaneSize+cbPlaneSize : yPlaneSize+cbPlaneSize+crPlaneSize]
 
-			for i := 0; i < len(currentPixelIndices); i++ {
-				if currentPixelIndices[i] != prevPixelIndices[i] {
-					deltas = append(deltas, DeltaPixel{index: uint64(i), color: currentPixelIndices[i]})
-				}
-			}
-
-			// Save block modifications: [16-bit Count][Repeated: 16-bit Position + 4-bit Color]
-			bw.WriteBits(uint64(len(deltas)), 16)
-			for _, d := range deltas {
-				bw.WriteBits(d.index, 16)
-				bw.WriteBits(d.color, 4)
-			}
+		// I-frame only: store Y (6-bit), Cb (5-bit), Cr (5-bit)
+		// Using I-frames for all frames avoids position overhead of deltas,
+		// which is actually more efficient for high-motion content.
+		for _, y := range yPlane {
+			bw.WriteBits(uint64(y>>2), yBits)
+		}
+		for _, cb := range cbPlane {
+			bw.WriteBits(uint64(cb>>3), cbBits)
+		}
+		for _, cr := range crPlane {
+			bw.WriteBits(uint64(cr>>3), crBits)
 		}
 
-		copy(prevPixelIndices, currentPixelIndices)
 		frameCount++
 	}
 
-	_ = cmd.Wait() // Clean up background thread
+	_ = cmd.Process.Kill()
+	_ = cmd.Wait()
 	bw.Flush()
 
-	// Update the frame count placeholder in our byte headers using Big Endian formatting
 	binary.BigEndian.PutUint16(bw.bytes[frameCountOffset:frameCountOffset+2], uint16(frameCount))
 
-	// Save the clean bitstream output to disk
-	err = os.WriteFile("optimized_video.bin", bw.bytes, 0644)
+	err = os.WriteFile(outputFile, bw.bytes, 0644)
 	if err != nil {
-		log.Fatalf("Failed saving bitstream target output file: %v", err)
+		log.Fatalf("Failed saving bitstream: %v", err)
+	}
+	log.Printf("Encoded %d frames (%dx%d) -> %d bytes to %s", frameCount, targetWidth, targetHeight, len(bw.bytes), outputFile)
+}
+
+func decode(inputFile, outputFile string, targetWidth, targetHeight int) {
+	data, err := os.ReadFile(inputFile)
+	if err != nil {
+		log.Fatalf("Failed to read bitstream: %v", err)
 	}
 
-	log.Printf("Success! Processed %d frames from MP4 -> Saved %d bytes to optimized_video.bin", frameCount, len(bw.bytes))
+	br := NewBitReader(data)
+
+	// Read header
+	w, err := br.ReadBits(16)
+	if err != nil {
+		log.Fatalf("Failed to read width: %v", err)
+	}
+	h, err := br.ReadBits(16)
+	if err != nil {
+		log.Fatalf("Failed to read height: %v", err)
+	}
+	frameCount, err := br.ReadBits(16)
+	if err != nil {
+		log.Fatalf("Failed to read frame count: %v", err)
+	}
+
+	log.Printf("Bitstream: %dx%d, %d frames", w, h, frameCount)
+
+	yPlaneSize := int(w) * int(h)
+	cbPlaneW := (int(w) + 1) / 2
+	cbPlaneH := (int(h) + 1) / 2
+	cbPlaneSize := cbPlaneW * cbPlaneH
+	crPlaneSize := cbPlaneSize
+
+	// Start FFmpeg to encode video
+	cmd := exec.Command("ffmpeg",
+		"-y",
+		"-f", "rawvideo",
+		"-pix_fmt", "yuv420p",
+		"-s", fmt.Sprintf("%dx%d", w, h),
+		"-r", "10",
+		"-an",
+		"-i", "-",
+		"-c:v", "libopenh264",
+		"-pix_fmt", "yuv420p",
+		outputFile,
+	)
+
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
+
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		log.Fatalf("Failed to create stdin pipe: %v", err)
+	}
+
+	if err := cmd.Start(); err != nil {
+		log.Fatalf("Failed to start FFmpeg: %v", err)
+	}
+
+	// Allocate per-plane buffers
+	yPlane := make([]byte, yPlaneSize)
+	cbPlane := make([]byte, cbPlaneSize)
+	crPlane := make([]byte, crPlaneSize)
+
+	// Frame buffer: Y + Cb + Cr interleaved for FFmpeg
+	frameBuf := make([]byte, yPlaneSize+cbPlaneSize+crPlaneSize)
+
+	for f := 0; f < int(frameCount); f++ {
+		// I-frame only: read Y (6-bit), Cb (5-bit), Cr (5-bit)
+		for i := 0; i < yPlaneSize; i++ {
+			val, err := br.ReadBits(yBits)
+			if err != nil {
+				log.Fatalf("Failed to read Y pixel %d frame %d: %v", i, f, err)
+			}
+			yPlane[i] = uint8(val<<2) | uint8(val>>4)
+		}
+		for i := 0; i < cbPlaneSize; i++ {
+			val, err := br.ReadBits(cbBits)
+			if err != nil {
+				log.Fatalf("Failed to read Cb pixel %d frame %d: %v", i, f, err)
+			}
+			cbPlane[i] = uint8(val<<3) | uint8(val>>2)
+		}
+		for i := 0; i < crPlaneSize; i++ {
+			val, err := br.ReadBits(crBits)
+			if err != nil {
+				log.Fatalf("Failed to read Cr pixel %d frame %d: %v", i, f, err)
+			}
+			crPlane[i] = uint8(val<<3) | uint8(val>>2)
+		}
+
+		// Pack frame: Y plane (w*h bytes), Cb plane (w*h/4 bytes), Cr plane (w*h/4 bytes)
+		copy(frameBuf, yPlane)
+		copy(frameBuf[yPlaneSize:], cbPlane)
+		copy(frameBuf[yPlaneSize+cbPlaneSize:], crPlane)
+
+		if _, err := stdin.Write(frameBuf); err != nil {
+			log.Fatalf("Failed to write frame %d: %v", f, err)
+		}
+	}
+
+	stdin.Close()
+	if err := cmd.Wait(); err != nil {
+		log.Printf("FFmpeg stderr:\n%s\n", stderrBuf.String())
+		log.Fatalf("FFmpeg encoding failed: %v", err)
+	}
+
+	log.Printf("Decoded %d frames (%dx%d) -> %s", frameCount, w, h, outputFile)
 }

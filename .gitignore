@@ -1,0 +1,25 @@
+# Binaries
+rrwm
+rrwm.exe
+converter/converter
+converter/converter.exe
+
+# Build artifacts / generated files
+optimized_video.bin
+converter/optimized_video.bin
+
+# Output directory (watermarked JPEGs, extracted payloads, decoded videos)
+output/
+
+# IDE / editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Stale config
+config.yaml

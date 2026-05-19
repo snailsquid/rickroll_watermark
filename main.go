@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"flag"
 	"fmt"
 	"image"
 	"image/jpeg"
@@ -16,9 +17,12 @@ import (
 
 const blockSize = 8
 
-type Arg struct {
+type Config struct {
+	Mode               string
 	OriginalImagePath string
 	ModifiedImagePath string
+	WatermarkPath     string
+	Quality           int
 }
 
 func IsValidFile(path string) bool {
@@ -29,22 +33,55 @@ func IsValidFile(path string) bool {
 	return !info.IsDir()
 }
 
-func InitializeApp() Arg {
-	if len(os.Args) != 3 {
-		log.Fatalf("Usage: go run main.go <input_image> <output_image>\n")
+func InitializeApp() Config {
+	// Define flags
+	quality := flag.Int("quality", 90, "JPEG quality (1-100)")
+
+	// Parse all flags (they can appear anywhere before positional args)
+	flag.Parse()
+
+	args := flag.Args()
+	if len(args) < 1 {
+		log.Fatalf("Usage:\n  %s [flags] insert <input_image> <output_image> [watermark_path]\n  %s [flags] extract <watermarked_image> <output_bin>\nFlags:\n  -quality int   JPEG quality 1-100 (default 90)\n", os.Args[0], os.Args[0])
 	}
 
-	if !IsValidFile(os.Args[1]) {
-		log.Fatalf("%v is not a valid file\n", os.Args[1])
-	}
+	mode := args[0]
+	posArgs := args[1:]
 
-	return Arg{
-		OriginalImagePath: os.Args[1],
-		ModifiedImagePath: os.Args[2],
+	switch mode {
+	case "insert":
+		if len(posArgs) < 2 {
+			log.Fatalf("insert: need <input_image> <output_image> [watermark_path]\n")
+		}
+		originalPath := posArgs[0]
+		outputPath := posArgs[1]
+		watermarkPath := "optimized_video.bin"
+		if len(posArgs) >= 3 {
+			watermarkPath = posArgs[2]
+		}
+		if !IsValidFile(originalPath) {
+			log.Fatalf("%v is not a valid file\n", originalPath)
+		}
+		if !IsValidFile(watermarkPath) {
+			log.Fatalf("%v is not a valid file\n", watermarkPath)
+		}
+		return Config{Mode: mode, OriginalImagePath: originalPath, ModifiedImagePath: outputPath, WatermarkPath: watermarkPath, Quality: *quality}
+	case "extract":
+		if len(posArgs) < 2 {
+			log.Fatalf("extract: need <watermarked_image> <output_bin>\n")
+		}
+		inputPath := posArgs[0]
+		outputPath := posArgs[1]
+		if !IsValidFile(inputPath) {
+			log.Fatalf("%v is not a valid file\n", inputPath)
+		}
+		return Config{Mode: mode, OriginalImagePath: inputPath, WatermarkPath: outputPath, Quality: *quality}
+	default:
+		log.Fatalf("Unknown mode: %s. Use 'insert' or 'extract'.\n", mode)
 	}
+	return Config{}
 }
 
-// AI Generated
 var luminanceQTable = [64]int{
 	16, 11, 10, 16, 24, 40, 51, 61,
 	12, 12, 14, 19, 26, 58, 60, 55,
@@ -56,7 +93,6 @@ var luminanceQTable = [64]int{
 	72, 92, 95, 98, 112, 100, 103, 99,
 }
 
-// AI Generated
 var chrominanceQTable = [64]int{
 	17, 18, 24, 47, 99, 99, 99, 99,
 	18, 21, 26, 66, 99, 99, 99, 99,
@@ -68,7 +104,6 @@ var chrominanceQTable = [64]int{
 	99, 99, 99, 99, 99, 99, 99, 99,
 }
 
-// AI Generated
 func scaleQTable(base [64]int, quality int) [64]int {
 	var scale int
 	if quality <= 0 {
@@ -97,11 +132,8 @@ func scaleQTable(base [64]int, quality int) [64]int {
 }
 
 func main() {
-
 	Start()
 }
-
-const IMAGE_PATH = "optimized_video.bin"
 
 func Start() {
 	defer func() {
@@ -111,67 +143,227 @@ func Start() {
 		}
 	}()
 
-	args := InitializeApp()
+	cfg := InitializeApp()
+	switch cfg.Mode {
+	case "insert":
+		insertWatermark(cfg)
+	case "extract":
+		extractWatermark(cfg)
+	}
+}
 
-	rawImage := GetImage(ReadFile(args.OriginalImagePath))
-	image := NewImage(ImageToYCbCr(rawImage))
+// ========================
+// INSERT: embed watermark
+// ========================
 
-	y := BlocksToDCT(image.Y)
-	println((*y)[0].at)
+func insertWatermark(cfg Config) {
+	rawImage := GetImage(ReadFile(cfg.OriginalImagePath))
+	ycbcr := ImageToYCbCr(rawImage)
+	img := NewImage(ycbcr)
 
-	zz := DCTsToZigZags(y)
+	quality := float64(cfg.Quality)
+	if quality < 1 {
+		quality = 1
+	}
+	if quality > 100 {
+		quality = 100
+	}
+	fmt.Printf("JPEG quality: %.0f\n", quality)
 
-	reader := LoadImage(IMAGE_PATH)
-	InsertBitsToZigZags(zz, reader)
+	// Process all three channels
+	dctsY := BlocksToDCT(img.Y)
+	dctsCb := BlocksToDCT(img.Cb)
+	dctsCr := BlocksToDCT(img.Cr)
 
-	(*y)[0].Print()
-	quality := 100.0
-	// (*y)[0].Quantize(quality, true)
-	for _, dct := range *y {
+	// Quantize (Y -> luminance, Cb/Cr -> chrominance)
+	for _, dct := range *dctsY {
 		dct.Quantize(quality, true)
 	}
-	(*y)[0].Print()
+	for _, dct := range *dctsCb {
+		dct.Quantize(quality, false)
+	}
+	for _, dct := range *dctsCr {
+		dct.Quantize(quality, false)
+	}
+
+	// Zigzag
+	zzY := DCTsToZigZags(dctsY)
+	zzCb := DCTsToZigZags(dctsCb)
+	zzCr := DCTsToZigZags(dctsCr)
+
+	// Insert watermark with 4-byte length prefix + triple redundancy
+	payload := ReadFile(cfg.WatermarkPath)
+	triplePayload := make([]byte, 4+3*len(payload))
+	triplePayload[0] = byte(len(payload) >> 24)
+	triplePayload[1] = byte(len(payload) >> 16)
+	triplePayload[2] = byte(len(payload) >> 8)
+	triplePayload[3] = byte(len(payload))
+	// Store each byte 3 times for majority voting
+	copy(triplePayload[4:4+len(payload)], payload)
+	copy(triplePayload[4+len(payload):4+2*len(payload)], payload)
+	copy(triplePayload[4+2*len(payload):4+3*len(payload)], payload)
+	fmt.Printf("Watermark payload (3x redundancy): %d bytes (%d original x3 + 4 header)\n",
+		len(triplePayload), len(payload))
+
+	reader := NewBitReader(triplePayload)
+	InsertBitsToZigZags(zzY, reader)
+	InsertBitsToZigZags(zzCb, reader)
+	InsertBitsToZigZags(zzCr, reader)
+
+	// Inverse zigzag
+	_ = ZigZagsToDCTs(zzY, dctsY)
+	_ = ZigZagsToDCTs(zzCb, dctsCb)
+	_ = ZigZagsToDCTs(zzCr, dctsCr)
+
+	// Dequantize
+	for _, dct := range *dctsY {
+		dct.Dequantize(quality, true)
+	}
+	for _, dct := range *dctsCb {
+		dct.Dequantize(quality, false)
+	}
+	for _, dct := range *dctsCr {
+		dct.Dequantize(quality, false)
+	}
+
+	// Inverse DCT -> pixel blocks
+	blocksY := DCTsToBlocks(dctsY, img.Y)
+	blocksCb := DCTsToBlocks(dctsCb, img.Cb)
+	blocksCr := DCTsToBlocks(dctsCr, img.Cr)
+
+	bw, bh := img.BlockWidth, img.BlockHeight
+	outputY := BlocksToPixels(blocksY, ycbcr.Bounds().Dx(), ycbcr.Bounds().Dy(), blockSize)
+	outputCb := BlocksToPixels(blocksCb, bw, bh, blockSize)
+	outputCr := BlocksToPixels(blocksCr, bw, bh, blockSize)
+
+	outYCbCr := image.NewYCbCr(ycbcr.Bounds(), ycbcr.SubsampleRatio)
+	copy(outYCbCr.Y, outputY)
+	if len(outputCb) == len(outYCbCr.Cb) {
+		copy(outYCbCr.Cb, outputCb)
+	}
+	if len(outputCr) == len(outYCbCr.Cr) {
+		copy(outYCbCr.Cr, outputCr)
+	}
+
+	SaveJPEG(outYCbCr, cfg.ModifiedImagePath, cfg.Quality)
+	fmt.Printf("Watermarked image saved to %s\n", cfg.ModifiedImagePath)
 }
 
-func (dct *DCT) Print() {
+// ========================
+// EXTRACT: recover watermark
+// ========================
+
+func extractWatermark(cfg Config) {
+	rawImage := GetImage(ReadFile(cfg.OriginalImagePath))
+	ycbcr := ImageToYCbCr(rawImage)
+
+	// Extract bits from all channels
+	quality := float64(cfg.Quality)
+	if quality < 1 {
+		quality = 1
+	}
+	if quality > 100 {
+		quality = 100
+	}
+	extractedBytes := extractBitsAllChannels(ycbcr, quality, MIN_SAFE_DCT_FREQ_IDX, MAX_SAFE_DCT_FREQ_IDX)
+	if len(extractedBytes) < 4 {
+		log.Fatalf("Not enough data extracted (%d bytes)\n", len(extractedBytes))
+	}
+
+	payloadLen := int(extractedBytes[0])<<24 | int(extractedBytes[1])<<16 |
+		int(extractedBytes[2])<<8 | int(extractedBytes[3])
+
+	// With triple redundancy: expected size is 4 + 3*payloadLen
+	expectedLen := 4 + 3*payloadLen
+	if expectedLen > len(extractedBytes) {
+		log.Fatalf("Watermark truncated: need %d bytes, have %d\n", expectedLen, len(extractedBytes))
+	}
+
+	// Triple majority voting: each byte appears 3 times,
+	// recover by taking the value that appears at least twice
+	actualPayload := make([]byte, payloadLen)
+	for i := 0; i < payloadLen; i++ {
+		a := extractedBytes[4+i]
+		b := extractedBytes[4+payloadLen+i]
+		c := extractedBytes[4+2*payloadLen+i]
+		if a == b || a == c {
+			actualPayload[i] = a
+		} else {
+			actualPayload[i] = b // b == c guaranteed if not a
+		}
+	}
+
+	err := os.WriteFile(cfg.WatermarkPath, actualPayload, 0644)
+	if err != nil {
+		log.Fatalf("Failed to write extracted watermark: %v", err)
+	}
+	fmt.Printf("Extracted %d bytes to %s\n", len(actualPayload), cfg.WatermarkPath)
+}
+
+// ========================
+// Quantization
+// ========================
+
+func (dct *DCT) Quantize(quality float64, isLuminance bool) {
+	var base [64]int
+	if isLuminance {
+		base = luminanceQTable
+	} else {
+		base = chrominanceQTable
+	}
+	scaled := scaleQTable(base, int(quality))
 	for i, row := range dct.at {
 		for j := range row {
-			fmt.Printf("%v ", (*dct).at[i][j])
-			if j == 7 {
-				fmt.Print("\n")
-			}
+			q := float64(scaled[i*8+j])
+			(*dct).at[i][j] = math.Round(dct.at[i][j] / q)
 		}
 	}
 }
 
-func (dct *DCT) Quantize(quality float64, y bool) {
-	if y {
-		scaled := scaleQTable(chrominanceQTable, int(quality))
-
-		for i, row := range dct.at {
-			for j := range row {
-				// fmt.Printf("%v : %v\n", dct.at[i][j], scaled[i*8+j])
-				(*dct).at[i][j] = math.Round(dct.at[i][j] / float64(scaled[i*8+j]))
-			}
+func (dct *DCT) Dequantize(quality float64, isLuminance bool) {
+	var base [64]int
+	if isLuminance {
+		base = luminanceQTable
+	} else {
+		base = chrominanceQTable
+	}
+	scaled := scaleQTable(base, int(quality))
+	for i, row := range dct.at {
+		for j := range row {
+			q := float64(scaled[i*8+j])
+			(*dct).at[i][j] = dct.at[i][j] * q
 		}
 	}
 }
 
-func ImageToYCbCr(input image.Image) *image.YCbCr {
-	if img, ok := input.(*image.YCbCr); ok {
-		return img
-	}
+// ========================
+// LSB on quantized integers
+// ========================
 
-	log.Fatalf("Failed to convert to YCbCr")
-	return nil
+func SetLSBQuantized(val float64, bit int) float64 {
+	intVal := int32(math.Round(val))
+	if bit == 1 {
+		intVal |= 1
+	} else {
+		intVal &^= 1
+	}
+	return float64(intVal)
 }
+
+func GetLSBInt(val float64) int {
+	intVal := int32(math.Round(val))
+	return int(intVal & 1)
+}
+
+// ========================
+// Image I/O
+// ========================
 
 func ReadFile(path string) []byte {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		panic(err)
 	}
-
 	fmt.Printf("File read: %v\n", path)
 	return data
 }
@@ -181,15 +373,41 @@ func GetImage(data []byte) image.Image {
 	if err != nil {
 		panic(err)
 	}
-
 	fmt.Printf("bounds: %v\n", img.Bounds())
 	return img
 }
 
+func ImageToYCbCr(input image.Image) *image.YCbCr {
+	if img, ok := input.(*image.YCbCr); ok {
+		return img
+	}
+	log.Fatalf("Failed to convert to YCbCr")
+	return nil
+}
+
+func SaveJPEG(img image.Image, path string, quality int) {
+	f, err := os.Create(path)
+	if err != nil {
+		panic(err)
+	}
+	defer f.Close()
+	err = jpeg.Encode(f, img, &jpeg.Options{Quality: quality})
+	if err != nil {
+		panic(err)
+	}
+}
+
+// ========================
+// Block structures
+// ========================
+
 type Image struct {
-	Y  *[]Block
-	Cb *[]Block
-	Cr *[]Block
+	Y              *[]Block
+	Cb             *[]Block
+	Cr             *[]Block
+	SubsampleRatio image.YCbCrSubsampleRatio
+	BlockWidth     int
+	BlockHeight    int
 }
 
 type Block struct {
@@ -200,6 +418,14 @@ type Block struct {
 type BlockShift struct {
 	at    [blockSize * blockSize]int8
 	count int
+}
+
+type DCT struct {
+	at [][]float64
+}
+
+type ZigZag struct {
+	at []*float64
 }
 
 func (b *Block) Append(pixel uint8) {
@@ -218,44 +444,56 @@ func NewImage(input *image.YCbCr) *Image {
 	height := bounds.Dy()
 
 	y := NewBlocks(input.Y, width, height)
-	cb := NewBlocks(input.Cb, width, height)
-	cr := NewBlocks(input.Cr, width, height)
 
-	image := Image{
-		Y:  &y,
-		Cb: &cb,
-		Cr: &cr,
+	bw, bh := width, height
+	switch input.SubsampleRatio {
+	case image.YCbCrSubsampleRatio420:
+		bw = (width + 1) / 2
+		bh = (height + 1) / 2
+	case image.YCbCrSubsampleRatio422:
+		bw = (width + 1) / 2
+	case image.YCbCrSubsampleRatio440:
+		bh = (height + 1) / 2
+	case image.YCbCrSubsampleRatio410:
+		bw = (width + 3) / 4
+	case image.YCbCrSubsampleRatio411:
+		bw = (width + 3) / 4
 	}
 
-	return &image
+	cb := NewBlocks(input.Cb, bw, bh)
+	cr := NewBlocks(input.Cr, bw, bh)
+
+	return &Image{
+		Y:              &y,
+		Cb:            &cb,
+		Cr:            &cr,
+		SubsampleRatio: input.SubsampleRatio,
+		BlockWidth:     bw,
+		BlockHeight:    bh,
+	}
 }
 
 func NewBlocks(pixels []uint8, width int, height int) []Block {
 	blocks := make([]Block, len(pixels)/(blockSize*blockSize))
-
 	for i, pixel := range pixels {
 		n := getBlockIndex(i, width, blockSize)
 		blocks[n].Append(pixel)
 	}
-
 	return blocks
 }
 
 func getBlockIndex(x, w, s int) int {
 	blocksPerRow := w / s
-
 	row := x / w
 	col := x % w
-
 	blockRow := row / s
 	blockCol := col / s
-
 	return (blockRow * blocksPerRow) + blockCol
 }
 
-type DCT struct {
-	at [][]float64
-}
+// ========================
+// Forward DCT pipeline
+// ========================
 
 func BlocksToDCT(blocks *[]Block) *[]*DCT {
 	dataBuffer := make([]float64, 64)
@@ -265,8 +503,7 @@ func BlocksToDCT(blocks *[]Block) *[]*DCT {
 	}
 
 	var dcts []*DCT
-
-	for i, _ := range *blocks {
+	for i := range *blocks {
 		shifted := (*blocks)[i].Shift()
 		dcts = append(dcts, shifted.ToDCT(&dataBuffer, &spine))
 	}
@@ -295,149 +532,280 @@ func (b *BlockShift) ToDCT(buffer *[]float64, spine *[][]float64) *DCT {
 			(*buffer)[i*blockSize+j] = float64((*b).at[i*blockSize+j])
 		}
 	}
-
 	result, err := go_fourier.DCT2D(*spine)
 	if err != nil {
 		panic(err)
 	}
-
-	dct := DCT{
-		at: result,
-	}
-
-	return &dct
+	return &DCT{at: result}
 }
 
-const MIN_SAFE_DCT_FREQ_IDX = 10
-const MAX_SAFE_DCT_FREQ_IDX = 45
-
-func InsertBitsToZigZags(zigzags *[]*ZigZag, bitReader *BitReader) {
-	for _, zz := range *zigzags {
-		finished := zz.InsertBits(bitReader)
-		if finished {
-			break
-		}
-	}
-}
-
-func (zz *ZigZag) InsertBits(bitReader *BitReader) bool {
-	for i := MIN_SAFE_DCT_FREQ_IDX; i < MAX_SAFE_DCT_FREQ_IDX; i++ {
-		current := zz.at[i]
-
-		toInsertBit, err := bitReader.NextBit()
-		if err == io.EOF {
-			fmt.Println("Finished.")
-			return true
-		}
-		*(zz.at[i]) = SetLSB32(*current, uint64(toInsertBit))
-	}
-	return false
-}
-
-type ZigZag struct {
-	at []*float64
-}
-
-func SetLSB32(f float64, bit uint64) float64 {
-	bits := math.Float64bits(f)
-
-	bits = (bits &^ 1) | (bit & 1)
-
-	return math.Float64frombits(bits)
-}
 func (dct *DCT) ToZigZag() *ZigZag {
 	return &ZigZag{at: ZigZagTraverse(dct.at)}
 }
 
-// AI Generated
-func ZigZagTraverse(matrix [][]float64) []*float64 {
-	if len(matrix) == 0 || len(matrix[0]) == 0 {
-		return nil
-	}
+// ========================
+// Inverse DCT pipeline
+// ========================
 
+func ZigZagsToDCTs(zigzags *[]*ZigZag, originalDCTs *[]*DCT) *[]*DCT {
+	for idx, zz := range *zigzags {
+		InverseZigZagTraverse((*originalDCTs)[idx].at, zz.at)
+	}
+	return originalDCTs
+}
+
+func InverseZigZagTraverse(matrix [][]float64, zigzag []*float64) {
+	if len(matrix) == 0 || len(matrix[0]) == 0 {
+		return
+	}
 	rows := len(matrix)
 	cols := len(matrix[0])
-	totalElements := rows * cols
-	result := make([]*float64, totalElements)
-
 	r, c := 0, 0
-	// direction: true means moving UP-RIGHT, false means moving DOWN-LEFT
 	movingUp := true
-
-	for i := 0; i < totalElements; i++ {
-		result[i] = &(matrix[r][c])
-
+	for i := 0; i < len(zigzag); i++ {
+		matrix[r][c] = *zigzag[i]
 		if movingUp {
-			// If we hit the right boundary, move down and change direction
 			if c == cols-1 {
 				r++
 				movingUp = false
-				// If we hit the top boundary, move right and change direction
 			} else if r == 0 {
 				c++
 				movingUp = false
-				// Otherwise, keep moving diagonally up-right
 			} else {
 				r--
 				c++
 			}
 		} else {
-			// If we hit the bottom boundary, move right and change direction
 			if r == rows-1 {
 				c++
 				movingUp = true
-				// If we hit the left boundary, move down and change direction
 			} else if c == 0 {
 				r++
 				movingUp = true
-				// Otherwise, keep moving diagonally down-left
 			} else {
 				r++
 				c--
 			}
 		}
 	}
+}
 
+func DCTsToBlocks(dcts *[]*DCT, originalBlocks *[]Block) *[]Block {
+	blocks := make([]Block, len(*originalBlocks))
+	for bi, dct := range *dcts {
+		result, err := go_fourier.DCTInverse2D(dct.at)
+		if err != nil {
+			panic(err)
+		}
+		for row := 0; row < blockSize; row++ {
+			for col := 0; col < blockSize; col++ {
+				val := result[row][col] + 128
+				if val < 0 {
+					val = 0
+				}
+				if val > 255 {
+					val = 255
+				}
+				blocks[bi].at[row*blockSize+col] = uint8(val)
+			}
+		}
+	}
+	return &blocks
+}
+
+func BlocksToPixels(blocks *[]Block, width, height, s int) []uint8 {
+	pixels := make([]uint8, width*height)
+	for i := range pixels {
+		n := getBlockIndex(i, width, s)
+		row := i / width
+		col := i % width
+		blockRow := row % s
+		blockCol := col % s
+		pixels[i] = (*blocks)[n].at[blockRow*s+blockCol]
+	}
+	return pixels
+}
+
+// ========================
+// Bit insertion / extraction
+// ========================
+
+// Use mid-frequency AC coefficients for robustness
+const MIN_SAFE_DCT_FREQ_IDX = 10
+const MAX_SAFE_DCT_FREQ_IDX = 45
+
+func extractBitsAllChannels(ycbcr *image.YCbCr, quality float64, minFreq, maxFreq int) []byte {
+	bounds := ycbcr.Bounds()
+	w := bounds.Dx()
+	bw := (w + 1) / 2
+
+	chPixels := [][]uint8{ycbcr.Y, ycbcr.Cb, ycbcr.Cr}
+	chWidths := []int{w, bw, bw}
+	isLum := []bool{true, false, false}
+
+	var result []byte
+	var cb byte
+	bc := 0
+
+	for ch := 0; ch < len(chPixels); ch++ {
+		pixels := chPixels[ch]
+		cw := chWidths[ch]
+		lum := isLum[ch]
+		nBlocks := len(pixels) / 64
+		blocks := make([][64]float64, nBlocks)
+
+		for i, p := range pixels {
+			bi := getBlockIndex(i, cw, 8)
+			row := i / cw
+			col := i % cw
+			br := (row % 8) * 8 + (col % 8)
+			blocks[bi][br] = float64(int(p) - 128)
+		}
+
+		for _, blk := range blocks {
+			mat := make([][]float64, 8)
+			for r := 0; r < 8; r++ {
+				mat[r] = blk[r*8 : (r+1)*8]
+			}
+			dct, err := go_fourier.DCT2D(mat)
+			if err != nil {
+				panic(err)
+			}
+
+			var base [64]int
+			if lum {
+				base = luminanceQTable
+			} else {
+				base = chrominanceQTable
+			}
+			scaled := scaleQTable(base, int(quality))
+			for r := 0; r < 8; r++ {
+				for c2 := 0; c2 < 8; c2++ {
+					dct[r][c2] = math.Round(dct[r][c2] / float64(scaled[r*8+c2]))
+				}
+			}
+
+			zz := ZigZagTraverse(dct)
+
+			for idx := minFreq; idx < maxFreq && idx < 64; idx++ {
+				bit := GetLSBInt(*zz[idx])
+				cb = (cb << 1) | byte(bit)
+				bc++
+				if bc == 8 {
+					result = append(result, cb)
+					cb = 0
+					bc = 0
+				}
+			}
+		}
+	}
+	if bc > 0 {
+		cb <<= (8 - bc)
+		result = append(result, cb)
+	}
 	return result
 }
 
-func LoadImage(imagePath string) *BitReader {
+func InsertBitsToZigZags(zigzags *[]*ZigZag, bitReader *BitReader) {
+	for _, zz := range *zigzags {
+		finished := zz.InsertBits(bitReader)
+		if finished {
+			return
+		}
+	}
+}
+
+func (zz *ZigZag) InsertBits(bitReader *BitReader) bool {
+	for i := MIN_SAFE_DCT_FREQ_IDX; i < MAX_SAFE_DCT_FREQ_IDX; i++ {
+		if zz.at[i] == nil {
+			continue
+		}
+		toInsertBit, err := bitReader.NextBit()
+		if err == io.EOF {
+			fmt.Println("Finished embedding watermark.")
+			return true
+		}
+		*zz.at[i] = SetLSBQuantized(*zz.at[i], toInsertBit)
+	}
+	return false
+}
+
+// ========================
+// Zigzag traversal
+// ========================
+
+func ZigZagTraverse(matrix [][]float64) []*float64 {
+	if len(matrix) == 0 || len(matrix[0]) == 0 {
+		return nil
+	}
+	rows := len(matrix)
+	cols := len(matrix[0])
+	totalElements := rows * cols
+	result := make([]*float64, totalElements)
+	r, c := 0, 0
+	movingUp := true
+	for i := 0; i < totalElements; i++ {
+		result[i] = &(matrix[r][c])
+		if movingUp {
+			if c == cols-1 {
+				r++
+				movingUp = false
+			} else if r == 0 {
+				c++
+				movingUp = false
+			} else {
+				r--
+				c++
+			}
+		} else {
+			if r == rows-1 {
+				c++
+				movingUp = true
+			} else if c == 0 {
+				r++
+				movingUp = true
+			} else {
+				r++
+				c--
+			}
+		}
+	}
+	return result
+}
+
+// ========================
+// Bit reader
+// ========================
+
+func LoadWatermark(imagePath string) *BitReader {
 	payloadBytes, err := os.ReadFile(imagePath)
 	if err != nil {
-		log.Fatalf("Cant load image\n")
+		log.Fatalf("Cannot load watermark: %v\n", err)
 	}
-
-	BitReader := NewBitReader(payloadBytes)
-
-	return BitReader
+	fmt.Printf("Watermark loaded: %d bytes\n", len(payloadBytes))
+	return NewBitReader(payloadBytes)
 }
 
 type BitReader struct {
 	bytes   []byte
 	byteIdx int
-	bitIdx  int // Tracks the bit position (0 to 7) inside the current byte
+	bitIdx  int
 }
 
 func NewBitReader(data []byte) *BitReader {
 	return &BitReader{bytes: data}
 }
 
-// NextBit returns the next bit (0 or 1). Returns io.EOF when out of data.
 func (br *BitReader) NextBit() (int, error) {
 	if br.byteIdx >= len(br.bytes) {
 		return 0, io.EOF
 	}
-
-	// Extract the bit starting from the Most Significant Bit (MSB)
 	shift := 7 - br.bitIdx
 	bit := int((br.bytes[br.byteIdx] >> shift) & 1)
-
-	// Move pointers forward
 	br.bitIdx++
 	if br.bitIdx == 8 {
 		br.bitIdx = 0
 		br.byteIdx++
 	}
-
 	return bit, nil
 }
