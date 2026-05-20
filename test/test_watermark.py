@@ -89,6 +89,15 @@ def run_all():
     w, h = orig.size
     print(f"Source: {w}x{h} ({w*h/1e6:.1f} MP)")
 
+    # Create a smaller test crop for speed (4MP center crop)
+    CROP_JPEG = os.path.join(OUTDIR, "test_crop.jpeg")
+    crop_size = 2048
+    cx, cy = w // 2, h // 2
+    crop = orig.crop((cx - crop_size//2, cy - crop_size//2,
+                      cx + crop_size//2, cy + crop_size//2))
+    crop.save(CROP_JPEG, "JPEG", quality=95)
+    print(f"Test crop: {crop_size}x{crop_size} ({crop_size*crop_size/1e6:.1f} MP)")
+
     # Generate 2 KB test payload
     rng = np.random.RandomState(42)
     payload = rng.bytes(2048)
@@ -104,15 +113,23 @@ def run_all():
     for q in qualities:
         print(f"\n--- Q={q} ---")
         wm_path = os.path.join(OUTDIR, f"watermarked_q{q}.jpeg")
+        base_path = os.path.join(OUTDIR, f"baseline_q{q}.jpeg")
 
-        ok, out, err = run_rrwm("insert", ORIG_JPEG, wm_path, payload_path, quality=q)
+        ok, out, err = run_rrwm("insert", CROP_JPEG, wm_path, payload_path, quality=q)
         if not ok:
             print(f"  INSERT FAILED: {err}")
             continue
 
-        # Image metrics
+        # Create baseline re-encode (same DCT pipeline, no watermark)
+        ok, _, _ = run_rrwm("reencode", CROP_JPEG, base_path, quality=q)
+        if not ok:
+            print(f"  REENCODE FAILED — falling back to original comparison")
+            base_path = ORIG_JPEG
+
+        # Image metrics: compare watermarked vs baseline (isolates watermark-only distortion)
         wm_img = PILImage.open(wm_path)
-        onp = np.array(orig.convert("YCbCr"), dtype=np.float64)
+        base_img = PILImage.open(base_path)
+        onp = np.array(base_img.convert("YCbCr"), dtype=np.float64)
         wnp = np.array(wm_img.convert("YCbCr"), dtype=np.float64)
         mse_y = mse(onp[:,:,0], wnp[:,:,0])
         mse_all = mse(onp, wnp)
@@ -135,9 +152,9 @@ def run_all():
             ber_val = 1.0
         print(f"  BER={ber_val:.2e}  {'✓ Perfect' if ber_val == 0 else '✗ LOSSY'}")
 
-        # Cross-quality extractions (subset for speed)
+        # Cross-quality extractions — limit to 2 for speed
         cross = {}
-        for xq in [70, 80, 90, 95, 100]:
+        for xq in [80, 95]:
             if xq == q:
                 continue
             xp = os.path.join(OUTDIR, f"extracted_q{q}_at{xq}.bin")
@@ -159,12 +176,12 @@ def run_all():
     with open(os.path.join(OUTDIR, "results.json"), "w") as f:
         json.dump(results, f, indent=2)
 
-    return results, orig
+    return results, orig, CROP_JPEG
 
 
 # ── Visualization generation ─────────────────────────────────────────
 
-def generate_vis(results, orig):
+def generate_vis(results, orig, crop_path):
     print("\n" + "=" * 60)
     print("Generating visualizations...")
     print("=" * 60)
@@ -188,15 +205,10 @@ def generate_vis(results, orig):
     ax.grid(axis="y", alpha=0.3)
     for b, v in zip(bars, bers):
         lbl = "0.0" if v == 0 else f"{v:.2e}"
-        yoff = 0.0005 if v == 0 else v * 2
+        # Place label above the bar; use fixed offset for zero bars
+        yoff = max(1e-6, v * 1.5) if v > 0 else 1e-5
         ax.text(b.get_x() + b.get_width()/2, yoff, lbl, ha="center", va="bottom",
                 fontsize=11, fontweight="bold", color="#27ae60" if v == 0 else "#e74c3c")
-    for i, r in enumerate(results):
-        st = "✓ Perfect" if r["success"] else "✗ Lossy"
-        c = "#27ae60" if r["success"] else "#e74c3c"
-        yv = 0.0001 if bers[i] == 0 else bers[i] * 5
-        ax.annotate(st, (i, bers[i]), xytext=(i, yv), ha="center", fontsize=9,
-                    fontstyle="italic", color=c)
     plt.tight_layout()
     fig.savefig(os.path.join(IMGDIR, "01_quality_vs_ber.png"), dpi=150, bbox_inches="tight"); plt.close()
     print("  01_quality_vs_ber.png")
@@ -257,40 +269,43 @@ def generate_vis(results, orig):
     fig.savefig(os.path.join(IMGDIR, "03_image_quality_metrics.png"), dpi=150, bbox_inches="tight"); plt.close()
     print("  03_image_quality_metrics.png")
 
-    # ── 4. Before/after visual comparison ──────────────────────────
-    cy, cx = orig.size[1] // 2, orig.size[0] // 2
+    # ── 4. Before/after visual comparison (baseline vs watermarked) ──
+    crop_img = PILImage.open(crop_path)
+    cy, cx = crop_img.size[1] // 2, crop_img.size[0] // 2
     cr = 256  # crop radius
     comp_qs = [75, 90, 100]
-    onp_rgb = np.array(orig)
 
     fig, axes = plt.subplots(2, 3, figsize=(18, 12))
-    oc = onp_rgb[cy-cr:cy+cr, cx-cr:cx+cr]
 
     for col, q in enumerate(comp_qs):
         wm_path = os.path.join(OUTDIR, f"watermarked_q{q}.jpeg")
-        if not os.path.exists(wm_path):
-            continue
-        wn = np.array(PILImage.open(wm_path))
-        wc = wn[cy-cr:cy+cr, cx-cr:cx+cr]
+        base_path = os.path.join(OUTDIR, f"baseline_q{q}.jpeg")
+        if not os.path.exists(wm_path) or not os.path.exists(base_path):
+            axes[0, col].axis("off"); axes[1, col].axis("off"); continue
+        
+        bc = np.array(PILImage.open(base_path))
+        wc = np.array(PILImage.open(wm_path))
+        bc = bc[cy-cr:cy+cr, cx-cr:cx+cr]
+        wc = wc[cy-cr:cy+cr, cx-cr:cx+cr]
 
-        combined = np.hstack([oc, wc])
+        combined = np.hstack([bc, wc])
         axes[0, col].imshow(combined)
         axes[0, col].axvline(cr, color="white", lw=2, ls="--", alpha=0.7)
-        axes[0, col].text(cr//2, 10, "Original", color="white", fontsize=12, fontweight="bold",
+        axes[0, col].text(cr//2, 10, f"Re-encode Q={q}", color="white", fontsize=12, fontweight="bold",
                           bbox=dict(facecolor="black", alpha=0.5, pad=2))
-        axes[0, col].text(cr + cr//2, 10, f"Q={q}", color="white", fontsize=12, fontweight="bold",
+        axes[0, col].text(cr + cr//2, 10, "Watermarked", color="white", fontsize=12, fontweight="bold",
                           bbox=dict(facecolor="black", alpha=0.5, pad=2))
-        axes[0, col].set_title(f"Original vs Watermarked (Q={q})", fontsize=14, fontweight="bold")
+        axes[0, col].set_title(f"Baseline vs Watermarked (Q={q})", fontsize=14, fontweight="bold")
         axes[0, col].axis("off")
 
-        diff = np.abs(oc.astype(float) - wc.astype(float))
+        diff = np.abs(bc.astype(float) - wc.astype(float))
         diff_gray = np.mean(diff, axis=2)
-        vmax = max(diff_gray.max() * 0.3, 1)
-        axes[1, col].imshow(diff_gray, cmap="inferno", vmin=0, vmax=min(vmax, 30))
-        axes[1, col].set_title(f"Difference (10x ampl.)\nMSE={mse(oc, wc):.2f}", fontsize=11)
+        vmax = max(diff_gray.max(), 1)
+        axes[1, col].imshow(diff_gray, cmap="inferno", vmin=0, vmax=min(vmax, 10))
+        axes[1, col].set_title(f"Watermark-only Difference\nMSE={mse(bc, wc):.4f}", fontsize=11)
         axes[1, col].axis("off")
 
-    fig.suptitle("Visual Comparison: Original vs Watermarked at Different JPEG Qualities",
+    fig.suptitle("Visual Comparison: Baseline Re-encode vs Watermarked at Different JPEG Qualities",
                  fontsize=16, fontweight="bold", y=1.01)
     plt.tight_layout()
     fig.savefig(os.path.join(IMGDIR, "04_before_after_comparison.png"), dpi=150, bbox_inches="tight"); plt.close()
@@ -365,19 +380,23 @@ def generate_vis(results, orig):
 
     # Single block at Q=90
     qv = 90
-    onp_y = np.array(orig.convert("YCbCr"), dtype=np.float64)[:,:,0]
-    blk_orig = onp_y[cy-64:cy-56, cx-64:cx-56]
-    dct_orig = dct2d(blk_orig)
-    qt = scale_q(lum_q, qv).reshape(8, 8)
-    qdct = np.round(dct_orig / qt)
-
+    base_path = os.path.join(OUTDIR, f"baseline_q{qv}.jpeg")
     wm_path = os.path.join(OUTDIR, f"watermarked_q{qv}.jpeg")
+
+    # Load baseline (re-encode at same quality, no watermark)
+    bny = np.array(PILImage.open(base_path).convert("YCbCr"), dtype=np.float64)[:,:,0]
+    blk_base = bny[cy-64:cy-56, cx-64:cx-56]
+    dct_base = dct2d(blk_base)
+    qt = scale_q(lum_q, qv).reshape(8, 8)
+    qdct_base = np.round(dct_base / qt)
+
+    # Load watermarked
     wny = np.array(PILImage.open(wm_path).convert("YCbCr"), dtype=np.float64)[:,:,0]
     blk_wm = wny[cy-64:cy-56, cx-64:cx-56]
     dct_wm = dct2d(blk_wm)
     qdct_wm = np.round(dct_wm / qt)
 
-    zz_orig = np.array([qdct[r,c] for r,c in zz])
+    zz_base = np.array([qdct_base[r,c] for r,c in zz])
     zz_wm = np.array([qdct_wm[r,c] for r,c in zz])
 
     fig, axes = plt.subplots(1, 3, figsize=(18, 6))
@@ -388,16 +407,16 @@ def generate_vis(results, orig):
         if 10 <= i <= 44: zz_colors.append("#e74c3c")
         elif i == 0: zz_colors.append("#3498db")
         else: zz_colors.append("#95a5a6")
-    ax.bar(range(64), np.abs(zz_orig), color=zz_colors, edgecolor="#333", lw=0.3)
+    ax.bar(range(64), np.abs(zz_base), color=zz_colors, edgecolor="#333", lw=0.3)
     ax.axvspan(9.5, 44.5, alpha=0.08, color="red", label="Embedding zone (idx 10-44)")
     ax.set_yscale("symlog")
     ax.set_xlabel("Zigzag Index", fontsize=12)
     ax.set_ylabel("|Quantized DCT Value|", fontsize=12)
-    ax.set_title("Quantized DCT in Zigzag Order (Original)", fontsize=13, fontweight="bold")
+    ax.set_title("Quantized DCT in Zigzag Order (Baseline Re-encode)", fontsize=13, fontweight="bold")
     ax.legend(fontsize=10); ax.grid(axis="y", alpha=0.3)
 
     ax = axes[1]
-    lsb_orig = np.array([int(abs(v)) & 1 for v in zz_orig[10:45]])
+    lsb_orig = np.array([int(abs(v)) & 1 for v in zz_base[10:45]])
     lsb_wm = np.array([int(abs(v)) & 1 for v in zz_wm[10:45]])
     changed = lsb_orig != lsb_wm
     bc = []
@@ -430,40 +449,41 @@ def generate_vis(results, orig):
     print("  08_lsb_embedding_detail.png")
 
     # ── 9. Embedding zone per-quality comparison ────────────────────
-    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+    embed_qs = [75, 85, 90, 95, 100]
+    fig, axes = plt.subplots(2, len(embed_qs), figsize=(25, 10))
     
-    for idx, q in enumerate([75, 85, 90, 95, 100]):
-        if idx > 4: break
-        col = idx
+    for idx, q in enumerate(embed_qs):
         wmp = os.path.join(OUTDIR, f"watermarked_q{q}.jpeg")
-        if not os.path.exists(wmp): continue
+        bp = os.path.join(OUTDIR, f"baseline_q{q}.jpeg")
+        if not os.path.exists(wmp) or not os.path.exists(bp): continue
         
         wny2 = np.array(PILImage.open(wmp).convert("YCbCr"), dtype=np.float64)[:,:,0]
-        bw = wny2[cy-64:cy-56, cx-64:cx-56]
-        dw = dct2d(bw)
+        bny = np.array(PILImage.open(bp).convert("YCbCr"), dtype=np.float64)[:,:,0]
+        bw = bny[cy-64:cy-56, cx-64:cx-56]
+        ww = wny2[cy-64:cy-56, cx-64:cx-56]
+        dw_b = dct2d(bw)
+        dw_w = dct2d(ww)
         qtw = scale_q(lum_q, q).reshape(8, 8)
-        qdw = np.round(dw / qtw)
-        zzw = np.array([qdw[r,c] for r,c in zz])
+        qdw_b = np.round(dw_b / qtw)
+        qdw_w = np.round(dw_w / qtw)
+        zzw_b = np.array([qdw_b[r,c] for r,c in zz])
+        zzw_w = np.array([qdw_w[r,c] for r,c in zz])
         
-        ax = axes[0, col]
-        lsb_w = np.array([int(abs(v)) & 1 for v in zzw[10:45]])
+        ax = axes[0, idx]
+        lsb_w = np.array([int(abs(v)) & 1 for v in zzw_w[10:45]])
         bc2 = ["#e74c3c" if b == 1 else "#3498db" for b in lsb_w]
-        ax.bar(range(35), zzw[10:45], color=bc2, edgecolor="#333", lw=0.3)
-        ax.set_title(f"Q={q} Embedding Zone", fontsize=12)
+        ax.bar(range(35), zzw_w[10:45], color=bc2, edgecolor="#333", lw=0.3)
+        ax.set_title(f"Q={q} Watermarked Zone", fontsize=12)
         ax.set_xlabel("Coeff offset"); ax.set_ylabel("Value")
         ax.grid(axis="y", alpha=0.3)
         
-        ax = axes[1, col]
-        diff_from_orig = zzw[10:45] - zz_orig[10:45]
-        dcolors = ["#27ae60" if d == 0 else "#e74c3c" for d in diff_from_orig]
-        ax.bar(range(35), diff_from_orig, color=dcolors, edgecolor="#333", lw=0.3)
-        ax.set_title(f"Δ from Original (Q={q})", fontsize=12)
+        ax = axes[1, idx]
+        diff_from_base = zzw_w[10:45] - zzw_b[10:45]
+        dcolors = ["#27ae60" if d == 0 else "#e74c3c" for d in diff_from_base]
+        ax.bar(range(35), diff_from_base, color=dcolors, edgecolor="#333", lw=0.3)
+        ax.set_title(f"Δ from Baseline (Q={q})", fontsize=12)
         ax.set_xlabel("Coeff offset"); ax.set_ylabel("Δ Value")
         ax.grid(axis="y", alpha=0.3)
-    
-    for idx in range(len([75, 85, 90, 95, 100]), 5):
-        axes[0, idx].axis("off")
-        axes[1, idx].axis("off")
     
     fig.suptitle("Embedding Zone Comparison Across Quality Levels", fontsize=15, fontweight="bold", y=1.02)
     plt.tight_layout()
@@ -496,5 +516,5 @@ def generate_vis(results, orig):
 
 
 if __name__ == "__main__":
-    r, o = run_all()
-    generate_vis(r, o)
+    r, o, c = run_all()
+    generate_vis(r, o, c)

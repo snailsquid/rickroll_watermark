@@ -49,6 +49,16 @@ func InitializeApp() Config {
 	posArgs := args[1:]
 
 	switch mode {
+	case "reencode":
+		if len(posArgs) < 2 {
+			log.Fatalf("reencode: need <input_image> <output_image>\n")
+		}
+		originalPath := posArgs[0]
+		outputPath := posArgs[1]
+		if !IsValidFile(originalPath) {
+			log.Fatalf("%v is not a valid file\n", originalPath)
+		}
+		return Config{Mode: mode, OriginalImagePath: originalPath, ModifiedImagePath: outputPath, Quality: *quality}
 	case "insert":
 		if len(posArgs) < 2 {
 			log.Fatalf("insert: need <input_image> <output_image> [watermark_path]\n")
@@ -147,6 +157,8 @@ func Start() {
 	switch cfg.Mode {
 	case "insert":
 		insertWatermark(cfg)
+	case "reencode":
+		reencodeJPEG(cfg)
 	case "extract":
 		extractWatermark(cfg)
 	}
@@ -247,6 +259,72 @@ func insertWatermark(cfg Config) {
 
 	SaveJPEG(outYCbCr, cfg.ModifiedImagePath, cfg.Quality)
 	fmt.Printf("Watermarked image saved to %s\n", cfg.ModifiedImagePath)
+}
+
+// ========================
+// REENCODE: process through DCT pipeline without watermark
+// ========================
+
+func reencodeJPEG(cfg Config) {
+	rawImage := GetImage(ReadFile(cfg.OriginalImagePath))
+	ycbcr := ImageToYCbCr(rawImage)
+	img := NewImage(ycbcr)
+
+	quality := float64(cfg.Quality)
+	if quality < 1 {
+		quality = 1
+	}
+	if quality > 100 {
+		quality = 100
+	}
+	fmt.Printf("JPEG quality: %.0f\n", quality)
+
+	// Process all three channels (same as insert, but skip bit embedding)
+	dctsY := BlocksToDCT(img.Y)
+	dctsCb := BlocksToDCT(img.Cb)
+	dctsCr := BlocksToDCT(img.Cr)
+
+	for _, dct := range *dctsY {
+		dct.Quantize(quality, true)
+	}
+	for _, dct := range *dctsCb {
+		dct.Quantize(quality, false)
+	}
+	for _, dct := range *dctsCr {
+		dct.Quantize(quality, false)
+	}
+
+	// Skip zigzag and bit insertion — dequantize directly
+	for _, dct := range *dctsY {
+		dct.Dequantize(quality, true)
+	}
+	for _, dct := range *dctsCb {
+		dct.Dequantize(quality, false)
+	}
+	for _, dct := range *dctsCr {
+		dct.Dequantize(quality, false)
+	}
+
+	blocksY := DCTsToBlocks(dctsY, img.Y)
+	blocksCb := DCTsToBlocks(dctsCb, img.Cb)
+	blocksCr := DCTsToBlocks(dctsCr, img.Cr)
+
+	bw, bh := img.BlockWidth, img.BlockHeight
+	outputY := BlocksToPixels(blocksY, ycbcr.Bounds().Dx(), ycbcr.Bounds().Dy(), blockSize)
+	outputCb := BlocksToPixels(blocksCb, bw, bh, blockSize)
+	outputCr := BlocksToPixels(blocksCr, bw, bh, blockSize)
+
+	outYCbCr := image.NewYCbCr(ycbcr.Bounds(), ycbcr.SubsampleRatio)
+	copy(outYCbCr.Y, outputY)
+	if len(outputCb) == len(outYCbCr.Cb) {
+		copy(outYCbCr.Cb, outputCb)
+	}
+	if len(outputCr) == len(outYCbCr.Cr) {
+		copy(outYCbCr.Cr, outputCr)
+	}
+
+	SaveJPEG(outYCbCr, cfg.ModifiedImagePath, cfg.Quality)
+	fmt.Printf("Re-encoded image saved to %s\n", cfg.ModifiedImagePath)
 }
 
 // ========================

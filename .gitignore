@@ -23,3 +23,11 @@ Thumbs.db
 
 # Stale config
 config.yaml
+
+# Test artifacts (generated)
+test/output/*.bin
+test/output/*.jpeg
+test/output/*.json
+test/output/summary.md
+test/output/payloads/
+__pycache__/

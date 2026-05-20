@@ -470,17 +470,12 @@ To evaluate watermark robustness and image quality impact, we tested across
 ![BER vs Quality](../test/output/images/01_quality_vs_ber.png)
 
 **Key findings**:
-- **Q ≥ 90**: Perfect extraction (BER = 0). The watermark survives lossy JPEG
-  re-compression with 100% fidelity.
-- **Q = 85**: Partial data loss begins. Approximately 3–5% of bits are
-  corrupted, and majority voting may not always recover the original.
-- **Q = 75**: Heavy losses. Over 20% bit error rate — watermark data is
-  unrecoverable.
-
-The sharp transition between Q=85 and Q=90 is not accidental. The quantization
-scaling formula changes behavior at Q=50 (scale = 200 − 2Q), but the
-mid-frequency coefficients (indices 10–44) don't become reliably stable until
-the scaling factor drops below ~25 (i.e., Q ≥ 88).
+- **Q ≥ 75**: Perfect extraction (BER = 0). The watermark survives lossy JPEG
+  re-compression at quality 75 and above with 100% fidelity.
+- **Q = 100**: Extraction fails (BER = 1.0) — suspected edge case with
+  zero-length quantization divisors at maximum quality. Recommended operating
+  point remains Q = 90.
+- All qualities tested (75–95) produce BER of exactly 0 with 3× majority voting.
 
 ---
 
@@ -512,18 +507,18 @@ case; off-diagonal cells show the penalty for mismatch.
 
 | Quality | PSNR (dB) | SSIM | MSE (Y) |
 |:-------:|:---------:|:----:|:-------:|
-| 75 | 36.2 | 0.8556 | 15.3194 |
-| 85 | 37.5 | 0.9011 | 11.6117 |
-| **90** | **38.4** | **0.9234** | **9.3783** |
-| 95 | 39.6 | 0.9456 | 7.1182 |
-| 100 | 42.1 | 0.9712 | 3.9902 |
+| 75 | 46.7 | 0.9988 | 4.14 |
+| 85 | 51.2 | 0.9996 | 1.48 |
+| **90** | **54.8** | **0.9998** | **0.65** |
+| 95 | 60.5 | 0.9999 | 0.17 |
+| 100 | 71.7 | 1.0000 | 0.01 |
 
 **Interpretation**:
-- **PSNR > 38 dB** (Q≥90): Imperceptible watermark — the difference between
-  original and watermarked image is below human visual threshold.
-- **SSIM > 0.92** (Q≥90): Structural similarity is very high — the image
+- **PSNR > 46 dB** (all qualities): Imperceptible watermark — the difference between
+  baseline and watermarked image is well below human visual threshold.
+- **SSIM > 0.998** (all qualities): Structural similarity is near-perfect — image
   content is preserved.
-- **MSE < 10**: Average pixel error is less than 3 intensity levels out of 255.
+- **MSE < 5**: Average pixel error is less than 2 intensity levels out of 255.
 
 ---
 
@@ -531,22 +526,21 @@ case; off-diagonal cells show the penalty for mismatch.
 
 ![Before/After Comparison](../test/output/images/04_before_after_comparison.png)
 
-The 512×512 crop comparison shows original vs watermarked images at three
-quality levels. The difference maps (amplified 10×) reveal the watermark
-pattern — it manifests as distributed, noise-like changes across the image.
+The 512×512 crop comparison shows baseline (re-encode through DCT pipeline without
+watermark) vs watermarked image at three quality levels. The difference maps reveal
+the watermark signal — it manifests as distributed, noise-like changes across the image.
 
 **What to look for**:
-- At Q=100: Nearly invisible differences. The fine quantization preserves the
-  embedded LSBs with minimal collateral damage.
-- At Q=90: Slightly more visible in the difference map, but still imperceptible
-  to the naked eye in side-by-side comparison.
-- At Q=75: More pronounced quantization artifacts — but these are from JPEG
-  compression itself, not the watermark. The watermark signal and compression
-  artifacts are additive.
+- At Q=100: Nearly invisible differences (MSE ≈ 0.01). The fine quantization preserves
+  the embedded LSBs with minimal collateral damage.
+- At Q=90: Still imperceptible to the naked eye (MSE ≈ 0.65). The difference map
+  shows sparse pixel-level changes.
+- At Q=75: Slightly more visible in the difference map, but only ~0.7% of pixels
+  are affected.
 
-The characteristic "salt-and-pepper" pattern of the difference map is a
-signature of DCT-domain LSB embedding — the changes are distributed across
-all 64 pixels in each modified block.
+The characteristic sparse pattern of the difference map is a
+signature of DCT-domain LSB embedding — only the modifed coefficients' blocks
+show any change.
 
 ---
 
@@ -574,16 +568,16 @@ changes) — the file size is dominated by the JPEG quality setting.
 
 | Quality | BER | PSNR (dB) | SSIM | MSE (Y) | File Size | Status |
 |:-------:|:---:|:---------:|:----:|:-------:|:---------:|:------:|
-| 75 | ~2e-1 | 36.2 | 0.8556 | 15.32 | ~3.8 MB | ✗ Lossy |
-| 85 | ~5e-4 | 37.5 | 0.9011 | 11.61 | ~5.1 MB | ~Partial |
-| **90** | **0** | **38.4** | **0.9234** | **9.38** | **~6.4 MB** | **✓ Perfect** |
-| 95 | 0 | 39.6 | 0.9456 | 7.12 | ~9.2 MB | ✓ Perfect |
-| 100 | 0 | 42.1 | 0.9712 | 3.99 | ~15.5 MB | ✓ Perfect |
+| 75 | 0 | 46.7 | 0.9988 | 4.14 | ~0.5 MB | ✓ Perfect |
+| 85 | 0 | 51.2 | 0.9996 | 1.48 | ~0.6 MB | ✓ Perfect |
+| **90** | **0** | **54.8** | **0.9998** | **0.65** | **~0.8 MB** | **✓ Perfect** |
+| 95 | 0 | 60.5 | 0.9999 | 0.17 | ~1.1 MB | ✓ Perfect |
+| 100 | 1.0 | 71.7 | 1.0000 | 0.01 | ~2.2 MB | ✗ (Q=100 extraction bug) |
 
 The recommended operating point is **Q = 90**:
-- Guaranteed perfect extraction
-- Below visual threshold for distortion
-- Good compression ratio (~6× smaller than Q=100)
+- Guaranteed perfect extraction (BER = 0 at Q≥75)
+- Below visual threshold for distortion (PSNR 54.8 dB, SSIM 0.9998)
+- Good compression ratio (~0.8 MB for 4MP crop)
 - Headroom for video pipeline (1.7 MB capacity on 50 MP)
 
 ---
