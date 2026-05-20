@@ -309,7 +309,7 @@ The diagram below shows one block's quantized DCT values in zigzag order. The
 red region (indices 10–44) is where watermark bits are stored. Each bar color
 indicates the current LSB value (red=1, blue=0).
 
-![LSB Embedding Detail](test/output/images/08_lsb_embedding_detail.png)
+![LSB Embedding Detail](../test/output/images/08_lsb_embedding_detail.png)
 
 The left panel shows all 64 zigzag coefficients with the embedding zone
 highlighted. The center panel shows the 35 zone coefficients after embedding
@@ -467,7 +467,7 @@ To evaluate watermark robustness and image quality impact, we tested across
 
 ## 2.2 BER vs JPEG Quality
 
-![BER vs Quality](test/output/images/01_quality_vs_ber.png)
+![BER vs Quality](../test/output/images/01_quality_vs_ber.png)
 
 **Key findings**:
 - **Q ≥ 90**: Perfect extraction (BER = 0). The watermark survives lossy JPEG
@@ -486,7 +486,7 @@ the scaling factor drops below ~25 (i.e., Q ≥ 88).
 
 ## 2.3 Cross-Quality Extraction
 
-![Cross-Quality Matrix](test/output/images/02_cross_quality_matrix.png)
+![Cross-Quality Matrix](../test/output/images/02_cross_quality_matrix.png)
 
 The cross-quality BER matrix shows what happens when embedding and extraction
 use **different** quality settings. The diagonal (same quality) is the ideal
@@ -508,7 +508,7 @@ case; off-diagonal cells show the penalty for mismatch.
 
 ## 2.4 Image Quality Metrics
 
-![Image Quality Metrics](test/output/images/03_image_quality_metrics.png)
+![Image Quality Metrics](../test/output/images/03_image_quality_metrics.png)
 
 | Quality | PSNR (dB) | SSIM | MSE (Y) |
 |:-------:|:---------:|:----:|:-------:|
@@ -529,7 +529,7 @@ case; off-diagonal cells show the penalty for mismatch.
 
 ## 2.5 Visual Comparison
 
-![Before/After Comparison](test/output/images/04_before_after_comparison.png)
+![Before/After Comparison](../test/output/images/04_before_after_comparison.png)
 
 The 512×512 crop comparison shows original vs watermarked images at three
 quality levels. The difference maps (amplified 10×) reveal the watermark
@@ -552,7 +552,7 @@ all 64 pixels in each modified block.
 
 ## 2.6 Block-Level Analysis
 
-![Embedding Zone Comparison](test/output/images/09_embedding_zone_comparison.png)
+![Embedding Zone Comparison](../test/output/images/09_embedding_zone_comparison.png)
 
 The embedding zone (zigzag indices 10–44) across quality levels shows how
 coefficient values change. At lower qualities, the larger quantization divisors
@@ -562,7 +562,7 @@ create more zero coefficients, reducing the effective capacity and reliability.
 
 ## 2.7 File Size Impact
 
-![File Size vs Quality](test/output/images/05_file_size_vs_quality.png)
+![File Size vs Quality](../test/output/images/05_file_size_vs_quality.png)
 
 The watermarked JPEG file size follows the expected JPEG quality curve. The
 watermark itself adds negligible overhead (a few hundred bytes worth of LSB
