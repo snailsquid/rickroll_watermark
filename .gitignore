@@ -9,7 +9,7 @@ optimized_video.bin
 converter/optimized_video.bin
 
 # Output directory (watermarked JPEGs, extracted payloads, decoded videos)
-output/
+/output/
 
 # IDE / editors
 .vscode/
